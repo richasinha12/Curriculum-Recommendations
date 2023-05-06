@@ -1,0 +1,138 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+import intelai.analytics.zoo.pipeline.api.keras.layers as zklayers
+import intelai.analytics.zoo.pipeline.api.keras.models as zkmodels
+import intelai.analytics.zoo.pipeline.api.keras.metrics as zkmetrics
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from intelai.federated import sycl
+from intelai.federated import dcplib
+
+def create_model():
+    model = zkmodels.Sequential()
+    model.add(zklayers.Dense(units=64, activation='relu', input_shape=(10,)))
+    model.add(zklayers.Dense(units=32, activation='relu'))
+    model.add(zklayers.Dense(units=3, activation='softmax'))
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=[zkmetrics.CategoricalAccuracy()])
+    return model
+
+def preprocess_data():
+    data = pd.read_csv('student_performance.csv')
+    X = data.drop('learning_style', axis=1)
+    y = data['learning_style']
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    kmeans = KMeans(n_clusters=3, random_state=42).fit(X_pca)
+    y_pred = kmeans.predict(X_pca)
+    return X, y_pred, scaler, pca, kmeans
+
+def recommend_resources(student_id, X, y_pred, scaler, pca, kmeans):
+    student_data = X.loc[student_id].values.reshape(1,-1)
+    scaled_data = scaler.transform(student_data)
+    pca_data = pca.transform(scaled_data)
+    cluster_id = kmeans.predict(pca_data)[0]
+    similar_students = np.where(y_pred == cluster_id)[0]
+    recommended_resources = data.iloc[similar_students].mean(axis=0).sort_values(ascending=False)[:3]
+
+    # Use Intel AI Analytics Toolkits to access and process learning resources data
+    with sycl(sycl_device_type=dcplib.DeviceType.CPU) as sy:
+        resources_data = pd.read_csv('learning_resources.csv')
+        resources_data = resources_data.drop('resource_id', axis=1)
+        resources_data_scaled = scaler.transform(resources_data)
+        resources_data_pca = pca.transform(resources_data_scaled)
+        resources_data_pred = kmeans.predict(resources_data_pca)
+
+        # Filter learning resources by cluster
+        cluster_resources = resources_data.iloc[np.where(resources_data_pred == cluster_id)[0]]
+        recommended_resources = pd.concat([recommended_resources, cluster_resources.mean(axis=0).sort_values(ascending=False)[:3]])
+
+    return recommended_resources
+
+def main():
+    X, y_pred, scaler, pca, kmeans = preprocess_data()
+    model = create_model()
+    history = model.fit(X, tf.keras.utils.to_categorical(y_pred), epochs=10, validation_split=0.2)
+    student_id = 1 # Example student ID
+    recommended_resources = recommend_resources(student_id, X, y_pred, scaler, pca, kmeans)
+    print(recommended_resources)
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+from flask import Flask, request, jsonify, render_template
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+import intelai.analytics.zoo.pipeline.api.keras.layers as zklayers
+import intelai.analytics.zoo.pipeline.api.keras.models as zkmodels
+import intelai.analytics.zoo.pipeline.api.keras.metrics as zkmetrics
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from intelai.federated import sycl
+from intelai.federated import dcplib
+
+app = Flask(__name__)
+
+def create_model():
+    model = zkmodels.Sequential()
+    model.add(zklayers.Dense(units=64, activation='relu', input_shape=(10,)))
+    model.add(zklayers.Dense(units=32, activation='relu'))
+    model.add(zklayers.Dense(units=3, activation='softmax'))
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=[zkmetrics.CategoricalAccuracy()])
+    return model
+
+def preprocess_data():
+    data = pd.read_csv('student_performance.csv')
+    X = data.drop('learning_style', axis=1)
+    y = data['learning_style']
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    kmeans = KMeans(n_clusters=3, random_state=42).fit(X_pca)
+    y_pred = kmeans.predict(X_pca)
+    return X, y_pred, scaler, pca, kmeans
+
+def recommend_resources(student_id, X, y_pred, scaler, pca, kmeans):
+    student_data = X.loc[student_id].values.reshape(1,-1)
+    scaled_data = scaler.transform(student_data)
+    pca_data = pca.transform(scaled_data)
+    cluster_id = kmeans.predict(pca_data)[0]
+    similar_students = np.where(y_pred == cluster_id)[0]
+    recommended_resources = data.iloc[similar_students].mean(axis=0).sort_values(ascending=False)[:3]
+
+    # Use Intel AI Analytics Toolkits to access and process learning resources data
+    with sycl(sycl_device_type=dcplib.DeviceType.CPU) as sy:
+        resources_data = pd.read_csv('learning_resources.csv')
+        resources_data = resources_data.drop('resource_id', axis=1)
+        resources_data_scaled = scaler.transform(resources_data)
+        resources_data_pca = pca.transform(resources_data_scaled)
+        resources_data_pred = kmeans.predict(resources_data_pca)
+
+        # Filter learning resources by cluster
+        cluster_resources = resources_data.iloc[np.where(resources_data_pred == cluster_id)[0]]
+        recommended_resources = pd.concat([recommended_resources, cluster_resources.mean(axis=0).sort_values(ascending=False)[:3]])
+
+    return recommended_resources
+
+@app.route('/')
+def home():
+    return render_template('index.html')
+
+@app.route('/recommendations', methods=['POST'])
+def recommendations():
+    student_id = request.form['student_id']
+    X, y_pred, scaler, pca, kmeans = preprocess_data()
+    recommended_resources = recommend_resources(int(student_id), X, y_pred, scaler, pca, kmeans)
+    return jsonify(recommended_resources.to_dict())
+
+if __name__ == '__main__':
+    app.run(debug=True)
